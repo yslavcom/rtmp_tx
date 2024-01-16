@@ -6,9 +6,9 @@
 
 use rml_rtmp::{
     sessions::{
-        ClientSession, ClientSessionConfig, ClientSessionResult, ClientSessionEvent},
+        ClientSession, ClientSessionConfig, ClientSessionResult, ClientSessionEvent, PublishRequestType},
     messages::{
-        MessagePayload, RtmpMessage, UserControlEventType},
+        MessagePayload, RtmpMessage},
     chunk_io::{ChunkSerializer, ChunkDeserializer, Packet},
     time::RtmpTimestamp,
 };
@@ -18,23 +18,17 @@ use std::collections::HashMap;
 use lazy_static::lazy_static;
 use std::sync::Mutex;
 
-#[macro_use] extern crate log;
-
-enum SendDataType {
-    Audio,
-    Video,
-}
-
 #[derive(Clone)]
 pub struct MyClientSessionConfig {
     pub config: ClientSessionConfig,
     stream_key: Option<String>,
 }
 
-static APP_NAME: &str = "test rtmp";
+// static APP_NAME: &str = "test rtmp";
 
 static YOUTUBE_CHUNK_SIZE: u32 = 128;
-static YOUTUBE_URL: &str = "rtmp://x.rtmp.youtube.com/live2";  // "rtmp://a.rtmp.youtube.com/live2";  ?
+static YOUTUBE_URL: &str = "a.rtmp.youtube.com";
+static YOUTUBE_APP: &str = "live2/x";
 static YOUTUBE_KEY: &str = "0kjx-g7uh-82dh-vbqc-ct1p";
 
 impl MyClientSessionConfig {
@@ -80,6 +74,10 @@ impl MyClientSessionConfig {
         }
     }
 
+    pub fn get_stream_key(&self) -> Option<String> {
+        return self.stream_key.clone();
+    }
+
     pub fn set_playback_buffer_len(&mut self, buffer_len: u32) {
         self.config.playback_buffer_length_ms = buffer_len;
     }
@@ -98,17 +96,15 @@ lazy_static! {
 }
 
 fn main() {
-    println!("Hello, world!");
-
     new_session_and_successful_connect_creates_set_chunk_size_message();
 }
 
 
 fn new_session_and_successful_connect_creates_set_chunk_size_message() {
-    let app_name = "test".to_string();
+    let app_name = YOUTUBE_APP.to_string();
     let mut config = CLIENT_CONFIG.lock().unwrap();
     config.set_chunk_size(4096);
-    config.set_flash_version(app_name.as_str());
+    config.set_flash_version("test");
 
     let mut deserializer = ChunkDeserializer::new();
     let mut serializer = ChunkSerializer::new();
@@ -122,16 +118,40 @@ fn new_session_and_successful_connect_creates_set_chunk_size_message() {
                 &mut serializer,
                 &mut deserializer,
             );
+
+            let stream_key = config.get_stream_key().unwrap_or_else(||{
+                panic!("Missing Stream Key, error");
+            });
+
+            println!("Go to `request_publishing`: {}", stream_key);
+
+            let results = session.request_publishing(stream_key, PublishRequestType::Live);
+            match results {
+                Ok(results) => {
+                    consume_results(&mut deserializer, vec![results]);
+                },
+                Err(err) => {
+                    println!("session.request_publishing error: {:?}", err);
+                }
+            }
         },
         Err(err) => {
-            debug!("ClientSessionError: {:?}", err);
+            println!("ClientSessionError: {:?}", err);
         }
     }
 }
 
 fn consume_results(deserializer: &mut ChunkDeserializer, results: Vec<ClientSessionResult>) {
     // Needed to keep the deserializer up to date
-    split_results(deserializer, results);
+    let results = split_results(deserializer, results);
+
+    let (messages, events) = results;
+    for event in events {
+        println!("consume_results, event:{:?}", event);
+    }
+    for message in messages {
+        println!("consume_results, message:{:?}", message);
+    }
 }
 
 
@@ -150,11 +170,13 @@ fn split_results(
                     .unwrap()
                     .unwrap();
                 let message = payload.to_rtmp_message().unwrap();
-                match message {
+                match message.clone() {
                     RtmpMessage::SetChunkSize { size } => {
                         deserializer.set_max_chunk_size(size as usize).unwrap()
                     }
-                    _ => (),
+                    other => {
+                        println!("\n**********\nother message\n**********\n")
+                    },
                 }
 
                 println!("response received: {:?}", message);
@@ -184,6 +206,7 @@ fn perform_successful_connect(
     let results = session.request_connection(app_name);
     match results {
         Ok(results) => {
+            println!("\n\nrequest_connection ok:{:02x?}", results);
             consume_results(deserializer, vec![results]);
             let response = get_connect_success_response(serializer);
             let results = session.handle_input(&response.bytes[..]);
@@ -200,17 +223,20 @@ fn perform_successful_connect(
                     }
                 }
                 Err(err) => {
-                    debug!("session.handle_input error: {:?}", err);
+                    println!("session.handle_input error: {:?}", err);
                 }
             }
         },
         Err(err) => {
-            debug!("session.request_connection error: {:?}", err);
+            println!("session.request_connection error: {:?}", err);
         }
     }
 }
 
 fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
+
+    print!("!!! get_connect_success_response");
+
     let mut command_properties = HashMap::new();
     command_properties.insert(
         "fmsVer".to_string(),
