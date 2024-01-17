@@ -13,7 +13,7 @@ use rml_rtmp::{
     time::RtmpTimestamp,
 };
 use rml_amf0::Amf0Value;
-use std::collections::HashMap;
+use std::{collections::HashMap, fs};
 
 use lazy_static::lazy_static;
 use std::sync::Mutex;
@@ -94,11 +94,6 @@ impl MyClientSessionConfig {
 lazy_static! {
     static ref CLIENT_CONFIG: Mutex<MyClientSessionConfig> = Mutex::new(MyClientSessionConfig::default());
 }
-
-fn main() {
-    new_session_and_successful_connect_creates_set_chunk_size_message();
-}
-
 
 fn new_session_and_successful_connect_creates_set_chunk_size_message() {
     let app_name = YOUTUBE_APP.to_string();
@@ -270,4 +265,43 @@ fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
         .into_message_payload(RtmpTimestamp::new(0), 0)
         .unwrap();
     serializer.serialize(&payload, false, false).unwrap()
+}
+
+/******************************************/
+
+
+use rscam::{Camera, Config};
+use std::io::Write;
+
+use openh264::encoder::{Encoder, EncoderConfig};
+
+fn main() {
+    //    new_session_and_successful_connect_creates_set_chunk_size_message();
+    let mut camera = Camera::new("/dev/video0").unwrap();
+
+    camera.start(&Config {
+        interval: (1, 30),      // 30 fps.
+        resolution: (1280, 720),
+        format: b"MJPG",
+        ..Default::default()
+    }).unwrap();
+
+    let formats = camera.formats();
+    for format in formats {
+        if let Ok(format) = format {
+            println!("description: {}", format.description);
+        }
+    }
+
+    for i in 0..10 {
+        let frame = camera.capture().unwrap();
+
+        let mut file = fs::File::create(&format!("frame-{}.jpg", i)).unwrap();
+        //println!("Fourcc:{:#?}", frame.format.to_ascii_lowercase());
+        let fourcc = std::str::from_utf8(&frame.format).unwrap();
+        println!("fourcc:{}", fourcc);
+        file.write_all(&frame[..]).unwrap();
+    }
+
+
 }
