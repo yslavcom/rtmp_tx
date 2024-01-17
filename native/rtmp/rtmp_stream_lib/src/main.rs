@@ -273,16 +273,23 @@ fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
 use rscam::{Camera, Config};
 use std::io::Write;
 
-use openh264::encoder::{Encoder, EncoderConfig};
+use openh264::encoder::{Encoder, EncoderConfig, RateControlMode};
+use openh264::OpenH264API;
+
+static X_RES: u32 = 1280;
+static Y_RES: u32 = 720;
+static FRAME_RATE: (u32, u32) = (1, 30); // 30 fps.
+static DEFAULT_BITRATE:u32 = 8_000_000;
+
 
 fn main() {
     //    new_session_and_successful_connect_creates_set_chunk_size_message();
     let mut camera = Camera::new("/dev/video0").unwrap();
 
     camera.start(&Config {
-        interval: (1, 30),      // 30 fps.
-        resolution: (1280, 720),
-        format: b"MJPG",
+        interval: FRAME_RATE,
+        resolution: (X_RES, Y_RES),
+        format: b"YU12",  // b"MJPG",
         ..Default::default()
     }).unwrap();
 
@@ -290,17 +297,26 @@ fn main() {
     for format in formats {
         if let Ok(format) = format {
             println!("description: {}", format.description);
+            let fourcc = std::str::from_utf8(&format.format).unwrap();
+            println!("fourcc:{}", fourcc);
         }
     }
+
+    let encoder_config = EncoderConfig::new(X_RES, Y_RES);
+    encoder_config.set_bitrate_bps(DEFAULT_BITRATE);
+    encoder_config.max_frame_rate(30.0);
+    encoder_config.rate_control_mode(RateControlMode::Bitrate);
+
+    let api = OpenH264API::from_source();
+    let mut encoder = Encoder::with_config(api, encoder_config);
 
     for i in 0..10 {
         let frame = camera.capture().unwrap();
 
-        let mut file = fs::File::create(&format!("frame-{}.jpg", i)).unwrap();
-        //println!("Fourcc:{:#?}", frame.format.to_ascii_lowercase());
-        let fourcc = std::str::from_utf8(&frame.format).unwrap();
-        println!("fourcc:{}", fourcc);
-        file.write_all(&frame[..]).unwrap();
+      //  let bitstream = encoder.encode(&frame)?;
+
+//        let mut file = fs::File::create(&format!("frame-{}.jpg", i)).unwrap();
+//        file.write_all(&frame[..]).unwrap();
     }
 
 
