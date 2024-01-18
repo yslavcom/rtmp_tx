@@ -270,22 +270,46 @@ fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
 
 /******************************************/
 
+use std::io::Write;
 
 use rscam::{Camera, Config, Frame};
-use std::io::Write;
 
 use openh264::encoder::{Encoder, EncoderConfig, RateControlMode};
 use openh264::OpenH264API;
-use openh264::formats::{YUVSource, YUVBuffer};
+use openh264::formats::YUVBuffer;
+
+use std::thread;
+use crossbeam_channel::unbounded;
+use crossbeam_channel::Receiver;
 
 static X_RES: u32 = 1280;
 static Y_RES: u32 = 720;
 static FRAME_RATE: (u32, u32) = (1, 30); // 30 fps.
-static DEFAULT_BITRATE:u32 = 8_000_000;
+static DEFAULT_BITRATE:u32 = 2_000_000;
 
+fn receiver(rx: Receiver<Vec<u8>>)
+{
+//    new_session_and_successful_connect_creates_set_chunk_size_message();
+
+    let mut file = fs::File::create("rx.h264").unwrap();
+    loop {
+        let frame = rx.recv();
+
+        if let Err(err) = frame {
+            error!("rx fail: {:#?}", err);
+        } else {
+            file.write_all(&frame.unwrap());
+        }
+    }
+}
 
 fn main() {
-    //    new_session_and_successful_connect_creates_set_chunk_size_message();
+
+    let (tx, rx) = unbounded();
+    thread::spawn(move || {
+        receiver(rx);
+    });
+
     let camera = create_camera().unwrap();
 
     let encoder = create_encoder();
@@ -303,10 +327,21 @@ fn main() {
                 error!("failed bitstream:{}", err);
             } else {
                 let bs = bitstream.unwrap();
+
+                // print frame type
                 println!("{:#?}", bs.frame_type());
+
+                // save to a file
                 let ret = bs.write(&mut file);
                 if let Err(err) = ret {
                     error!("bs failure: {:#?}", err);
+                }
+
+                // send to a different thread
+                let frame = bs.to_vec();
+                let tx_res = tx.send(frame);
+                if let Err(err) = tx_res {
+                    error!("tx fail: {:#?}", err);
                 }
             }
         }
@@ -323,7 +358,7 @@ fn create_camera() -> Option<Camera>
         format: b"RGB3", // b"YU12",  // b"MJPG",
         ..Default::default()
     });
-    if let Err(err) = res {
+    if let Err(_) = res {
         return None;
     }
 
