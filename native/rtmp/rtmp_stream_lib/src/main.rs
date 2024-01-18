@@ -4,6 +4,7 @@
 3. Request access to publish with a particular stream name
 */
 
+use log::error;
 use rml_rtmp::{
     sessions::{
         ClientSession, ClientSessionConfig, ClientSessionResult, ClientSessionEvent, PublishRequestType},
@@ -270,11 +271,12 @@ fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
 /******************************************/
 
 
-use rscam::{Camera, Config};
+use rscam::{Camera, Config, Frame};
 use std::io::Write;
 
 use openh264::encoder::{Encoder, EncoderConfig, RateControlMode};
 use openh264::OpenH264API;
+use openh264::formats::{YUVSource, YUVBuffer};
 
 static X_RES: u32 = 1280;
 static Y_RES: u32 = 720;
@@ -289,7 +291,7 @@ fn main() {
     camera.start(&Config {
         interval: FRAME_RATE,
         resolution: (X_RES, Y_RES),
-        format: b"YU12",  // b"MJPG",
+        format: b"RGB3", // b"YU12",  // b"MJPG",
         ..Default::default()
     }).unwrap();
 
@@ -305,19 +307,47 @@ fn main() {
     let encoder_config = EncoderConfig::new(X_RES, Y_RES);
     encoder_config.set_bitrate_bps(DEFAULT_BITRATE);
     encoder_config.max_frame_rate(30.0);
-    encoder_config.rate_control_mode(RateControlMode::Bitrate);
+    encoder_config.rate_control_mode(RateControlMode::Quality);
+    encoder_config.enable_skip_frame(true);
 
     let api = OpenH264API::from_source();
-    let mut encoder = Encoder::with_config(api, encoder_config);
+    let encoder = Encoder::with_config(api, encoder_config);
 
-    for i in 0..10 {
-        let frame = camera.capture().unwrap();
+    if let Err(err) = encoder {
+        error!("Failed to invoke encoder:{}", err);
+    } else {
+        let mut encoder = encoder.unwrap();
+        let mut file = fs::File::create("vid.h264").unwrap();
+        loop {
+            let frame = camera.capture().unwrap();
+            let yuv_source = MyFrame::build(&frame);
+            let bitstream = encoder.encode(&yuv_source.payload);
 
-      //  let bitstream = encoder.encode(&frame)?;
-
-//        let mut file = fs::File::create(&format!("frame-{}.jpg", i)).unwrap();
-//        file.write_all(&frame[..]).unwrap();
+            if let Err(err) = bitstream {
+                error!("failed bitstream:{}", err);
+            } else {
+                let bs = bitstream.unwrap();
+                println!("{:#?}", bs.frame_type());
+                let ret = bs.write(&mut file);
+                if let Err(err) = ret {
+                    error!("bs failure: {:#?}", err);
+                }
+            }
+        }
     }
+}
 
+struct MyFrame {
+    payload: YUVBuffer,
+}
 
+impl MyFrame {
+    pub fn build(frame: &Frame) -> Self {
+        let w = frame.resolution.0 as usize;
+        let h = frame.resolution.1 as usize;
+
+        Self {
+            payload: YUVBuffer::with_rgb(w, h, &frame[..]),
+        }
+    }
 }
