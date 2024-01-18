@@ -286,33 +286,9 @@ static DEFAULT_BITRATE:u32 = 8_000_000;
 
 fn main() {
     //    new_session_and_successful_connect_creates_set_chunk_size_message();
-    let mut camera = Camera::new("/dev/video0").unwrap();
+    let camera = create_camera().unwrap();
 
-    camera.start(&Config {
-        interval: FRAME_RATE,
-        resolution: (X_RES, Y_RES),
-        format: b"RGB3", // b"YU12",  // b"MJPG",
-        ..Default::default()
-    }).unwrap();
-
-    let formats = camera.formats();
-    for format in formats {
-        if let Ok(format) = format {
-            println!("description: {}", format.description);
-            let fourcc = std::str::from_utf8(&format.format).unwrap();
-            println!("fourcc:{}", fourcc);
-        }
-    }
-
-    let encoder_config = EncoderConfig::new(X_RES, Y_RES);
-    encoder_config.set_bitrate_bps(DEFAULT_BITRATE);
-    encoder_config.max_frame_rate(30.0);
-    encoder_config.rate_control_mode(RateControlMode::Quality);
-    encoder_config.enable_skip_frame(true);
-
-    let api = OpenH264API::from_source();
-    let encoder = Encoder::with_config(api, encoder_config);
-
+    let encoder = create_encoder();
     if let Err(err) = encoder {
         error!("Failed to invoke encoder:{}", err);
     } else {
@@ -337,6 +313,45 @@ fn main() {
     }
 }
 
+fn create_camera() -> Option<Camera>
+{
+    let mut camera = Camera::new("/dev/video0").unwrap();
+
+    let res = camera.start(&Config {
+        interval: FRAME_RATE,
+        resolution: (X_RES, Y_RES),
+        format: b"RGB3", // b"YU12",  // b"MJPG",
+        ..Default::default()
+    });
+    if let Err(err) = res {
+        return None;
+    }
+
+    let formats = camera.formats();
+    for format in formats {
+        if let Ok(format) = format {
+            println!("description: {}", format.description);
+            let fourcc = std::str::from_utf8(&format.format).unwrap();
+            println!("fourcc:{}", fourcc);
+        }
+    }
+
+    Some(camera)
+}
+
+fn create_encoder() -> Result<Encoder, openh264::Error> {
+    let encoder_config = EncoderConfig::new(X_RES, Y_RES);
+    encoder_config.set_bitrate_bps(DEFAULT_BITRATE);
+    encoder_config.max_frame_rate(30.0);
+    encoder_config.rate_control_mode(RateControlMode::Quality);
+    encoder_config.enable_skip_frame(true);
+
+    let api = OpenH264API::from_source();
+    let encoder = Encoder::with_config(api, encoder_config);
+
+    return encoder;
+}
+
 struct MyFrame {
     payload: YUVBuffer,
 }
@@ -351,3 +366,4 @@ impl MyFrame {
         }
     }
 }
+
