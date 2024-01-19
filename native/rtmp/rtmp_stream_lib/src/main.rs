@@ -5,15 +5,16 @@
 */
 
 use log::error;
+use rml_amf0::Amf0Value;
 use rml_rtmp::{
+    chunk_io::{ChunkDeserializer, ChunkSerializer, Packet},
+    messages::{MessagePayload, RtmpMessage},
     sessions::{
-        ClientSession, ClientSessionConfig, ClientSessionResult, ClientSessionEvent, PublishRequestType},
-    messages::{
-        MessagePayload, RtmpMessage},
-    chunk_io::{ChunkSerializer, ChunkDeserializer, Packet},
+        ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult,
+        PublishRequestType,
+    },
     time::RtmpTimestamp,
 };
-use rml_amf0::Amf0Value;
 use std::{collections::HashMap, fs};
 
 use lazy_static::lazy_static;
@@ -40,13 +41,13 @@ impl MyClientSessionConfig {
         }
     }
 
-    pub fn default() ->Self {
+    pub fn default() -> Self {
         let mut var = Self::custom_config(Some(YOUTUBE_CHUNK_SIZE), Some(YOUTUBE_URL));
         var.set_stream_key(Some(YOUTUBE_KEY));
         return var;
     }
 
-    pub fn custom_config(chunk_size: Option<u32>, tc_url: Option<&str>) ->Self {
+    pub fn custom_config(chunk_size: Option<u32>, tc_url: Option<&str>) -> Self {
         let mut var = Self::new();
 
         if let Some(chunk_size) = chunk_size {
@@ -68,7 +69,7 @@ impl MyClientSessionConfig {
     }
 
     pub fn set_stream_key(&mut self, stream_key: Option<&str>) {
-        if stream_key.is_some(){
+        if stream_key.is_some() {
             self.stream_key = Some(stream_key.unwrap().to_string());
         } else {
             self.stream_key = None;
@@ -93,7 +94,8 @@ impl MyClientSessionConfig {
 }
 
 lazy_static! {
-    static ref CLIENT_CONFIG: Mutex<MyClientSessionConfig> = Mutex::new(MyClientSessionConfig::default());
+    static ref CLIENT_CONFIG: Mutex<MyClientSessionConfig> =
+        Mutex::new(MyClientSessionConfig::default());
 }
 
 fn new_session_and_successful_connect_creates_set_chunk_size_message() {
@@ -115,7 +117,7 @@ fn new_session_and_successful_connect_creates_set_chunk_size_message() {
                 &mut deserializer,
             );
 
-            let stream_key = config.get_stream_key().unwrap_or_else(||{
+            let stream_key = config.get_stream_key().unwrap_or_else(|| {
                 panic!("Missing Stream Key, error");
             });
 
@@ -124,13 +126,14 @@ fn new_session_and_successful_connect_creates_set_chunk_size_message() {
             let results = session.request_publishing(stream_key, PublishRequestType::Live);
             match results {
                 Ok(results) => {
+                    println!("Consume results after 'request_publishing'");
                     consume_results(&mut deserializer, vec![results]);
-                },
+                }
                 Err(err) => {
                     println!("session.request_publishing error: {:?}", err);
                 }
             }
-        },
+        }
         Err(err) => {
             println!("ClientSessionError: {:?}", err);
         }
@@ -149,7 +152,6 @@ fn consume_results(deserializer: &mut ChunkDeserializer, results: Vec<ClientSess
         println!("consume_results, message:{:?}", message);
     }
 }
-
 
 fn split_results(
     deserializer: &mut ChunkDeserializer,
@@ -172,7 +174,7 @@ fn split_results(
                     }
                     other => {
                         println!("\n**********\nother message\n**********\n")
-                    },
+                    }
                 }
 
                 println!("response received: {:?}", message);
@@ -222,7 +224,7 @@ fn perform_successful_connect(
                     println!("session.handle_input error: {:?}", err);
                 }
             }
-        },
+        }
         Err(err) => {
             println!("session.request_connection error: {:?}", err);
         }
@@ -230,7 +232,6 @@ fn perform_successful_connect(
 }
 
 fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
-
     print!("!!! get_connect_success_response");
 
     let mut command_properties = HashMap::new();
@@ -275,23 +276,22 @@ use std::io::Write;
 use rscam::{Camera, Config, Frame};
 
 use openh264::encoder::{Encoder, EncoderConfig, RateControlMode};
-use openh264::OpenH264API;
 use openh264::formats::YUVBuffer;
+use openh264::OpenH264API;
 
-use std::thread;
 use crossbeam_channel::unbounded;
 use crossbeam_channel::Receiver;
+use std::thread;
 
 static X_RES: u32 = 1280;
 static Y_RES: u32 = 720;
 static FRAME_RATE: (u32, u32) = (1, 30); // 30 fps.
-static DEFAULT_BITRATE:u32 = 2_000_000;
+static DEFAULT_BITRATE: u32 = 2_000_000;
 
-fn receiver(rx: Receiver<Vec<u8>>)
-{
-//    new_session_and_successful_connect_creates_set_chunk_size_message();
+fn receiver(rx: Receiver<Vec<u8>>) {
+    //    new_session_and_successful_connect_creates_set_chunk_size_message();
 
-    let mut file = fs::File::create("rx.h264").unwrap();
+    let mut file = fs::File::create("rx-thread.h264").unwrap();
     loop {
         let frame = rx.recv();
 
@@ -303,39 +303,44 @@ fn receiver(rx: Receiver<Vec<u8>>)
     }
 }
 
-fn main() {
+fn encode(rx_enc: Receiver<MyFrame>) {
+    //        let mut file = fs::File::create("vid.h264").unwrap();
 
     let (tx, rx) = unbounded();
     thread::spawn(move || {
         receiver(rx);
     });
 
-    let camera = create_camera().unwrap();
-
     let encoder = create_encoder();
+
     if let Err(err) = encoder {
         error!("Failed to invoke encoder:{}", err);
     } else {
         let mut encoder = encoder.unwrap();
-        let mut file = fs::File::create("vid.h264").unwrap();
         loop {
-            let frame = camera.capture().unwrap();
-            let yuv_source = MyFrame::build(&frame);
-            let bitstream = encoder.encode(&yuv_source.payload);
+            let yuv_source = rx_enc.recv();
+            if let Err(err) = yuv_source {
+                error!("yuv_source rx fail: {:#?}", err);
+            } else {
+                //            file.write_all(&frame.unwrap());
+            }
 
+            let bitstream = encoder.encode(&yuv_source.unwrap().payload);
             if let Err(err) = bitstream {
                 error!("failed bitstream:{}", err);
             } else {
                 let bs = bitstream.unwrap();
 
                 // print frame type
-                println!("{:#?}", bs.frame_type());
+                //          println!("{:#?}", bs.frame_type());
 
-                // save to a file
-                let ret = bs.write(&mut file);
-                if let Err(err) = ret {
-                    error!("bs failure: {:#?}", err);
-                }
+                /*
+                            // save to a file
+                            let ret = bs.write(&mut file);
+                            if let Err(err) = ret {
+                                error!("bs failure: {:#?}", err);
+                            }
+                */
 
                 // send to a different thread
                 let frame = bs.to_vec();
@@ -348,8 +353,27 @@ fn main() {
     }
 }
 
-fn create_camera() -> Option<Camera>
-{
+fn main() {
+    let (tx_cam, rx_enc) = unbounded();
+    thread::spawn(move || {
+        encode(rx_enc);
+    });
+
+    let camera = create_camera().unwrap();
+    let mut old_ts: u64 = 0;
+
+    loop {
+        let frame = camera.capture().unwrap();
+        let yuv_source = MyFrame::build(&frame);
+
+        println!("ts-delta:{}", frame.get_timestamp() - old_ts);
+        old_ts = frame.get_timestamp();
+
+        tx_cam.send(yuv_source);
+    }
+}
+
+fn create_camera() -> Option<Camera> {
     let mut camera = Camera::new("/dev/video0").unwrap();
 
     let res = camera.start(&Config {
@@ -401,4 +425,3 @@ impl MyFrame {
         }
     }
 }
-
