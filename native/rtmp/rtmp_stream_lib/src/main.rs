@@ -288,7 +288,7 @@ static Y_RES: u32 = 720;
 static FRAME_RATE: (u32, u32) = (1, 30); // 30 fps.
 static DEFAULT_BITRATE: u32 = 2_000_000;
 
-fn receiver(rx: Receiver<Vec<u8>>) {
+fn receiver(rx: Receiver<MyEncodedFrame>) {
     //    new_session_and_successful_connect_creates_set_chunk_size_message();
 
     let mut file = fs::File::create("rx-thread.h264").unwrap();
@@ -298,14 +298,12 @@ fn receiver(rx: Receiver<Vec<u8>>) {
         if let Err(err) = frame {
             error!("rx fail: {:#?}", err);
         } else {
-            file.write_all(&frame.unwrap());
+            file.write_all(&frame.unwrap().payload);
         }
     }
 }
 
 fn encode(rx_enc: Receiver<MyFrame>) {
-    //        let mut file = fs::File::create("vid.h264").unwrap();
-
     let (tx, rx) = unbounded();
     thread::spawn(move || {
         receiver(rx);
@@ -322,31 +320,22 @@ fn encode(rx_enc: Receiver<MyFrame>) {
             if let Err(err) = yuv_source {
                 error!("yuv_source rx fail: {:#?}", err);
             } else {
-                //            file.write_all(&frame.unwrap());
-            }
+                let yuv_source = yuv_source.unwrap();
+                let bitstream = encoder.encode(&yuv_source.payload);
+                if let Err(err) = bitstream {
+                    error!("failed bitstream:{}", err);
+                } else {
+                    let bs = bitstream.unwrap();
 
-            let bitstream = encoder.encode(&yuv_source.unwrap().payload);
-            if let Err(err) = bitstream {
-                error!("failed bitstream:{}", err);
-            } else {
-                let bs = bitstream.unwrap();
+                    // print frame type
+                    //          println!("{:#?}", bs.frame_type());
 
-                // print frame type
-                //          println!("{:#?}", bs.frame_type());
-
-                /*
-                            // save to a file
-                            let ret = bs.write(&mut file);
-                            if let Err(err) = ret {
-                                error!("bs failure: {:#?}", err);
-                            }
-                */
-
-                // send to a different thread
-                let frame = bs.to_vec();
-                let tx_res = tx.send(frame);
-                if let Err(err) = tx_res {
-                    error!("tx fail: {:#?}", err);
+                    // send to a different thread
+                    let frame = MyEncodedFrame::build(bs.to_vec(), yuv_source.timestamp);
+                    let tx_res = tx.send(frame);
+                    if let Err(err) = tx_res {
+                        error!("tx fail: {:#?}", err);
+                    }
                 }
             }
         }
@@ -360,14 +349,10 @@ fn main() {
     });
 
     let camera = create_camera().unwrap();
-    let mut old_ts: u64 = 0;
 
     loop {
         let frame = camera.capture().unwrap();
-        let yuv_source = MyFrame::build(&frame);
-
-        println!("ts-delta:{}", frame.get_timestamp() - old_ts);
-        old_ts = frame.get_timestamp();
+        let yuv_source = MyFrame::build(&frame, frame.get_timestamp());
 
         tx_cam.send(yuv_source);
     }
@@ -413,15 +398,31 @@ fn create_encoder() -> Result<Encoder, openh264::Error> {
 
 struct MyFrame {
     payload: YUVBuffer,
+    timestamp: u64,
 }
 
 impl MyFrame {
-    pub fn build(frame: &Frame) -> Self {
+    pub fn build(frame: &Frame, ts: u64) -> Self {
         let w = frame.resolution.0 as usize;
         let h = frame.resolution.1 as usize;
 
         Self {
             payload: YUVBuffer::with_rgb(w, h, &frame[..]),
+            timestamp: ts
+        }
+    }
+}
+
+struct MyEncodedFrame {
+    payload: Vec<u8>,
+    timestamp: u64,
+}
+
+impl MyEncodedFrame {
+    pub fn build(frame: Vec<u8>, ts: u64) -> Self {
+        Self {
+            payload: frame,
+            timestamp: ts
         }
     }
 }
