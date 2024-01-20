@@ -3,9 +3,10 @@
 2. Request to open a stream to publish on
 3. Request access to publish with a particular stream name
 */
-
+use rand;
+use bytes::Bytes;
 use log::error;
-use rml_amf0::{Amf0Value, serialize};
+use rml_amf0::{serialize, Amf0Value};
 use rml_rtmp::{
     chunk_io::{ChunkDeserializer, ChunkSerializer, Packet},
     messages::{MessagePayload, RtmpMessage},
@@ -15,8 +16,7 @@ use rml_rtmp::{
     },
     time::RtmpTimestamp,
 };
-use std::{collections::HashMap, fs};
-use bytes::Bytes;
+use std::{collections::HashMap, fs, result};
 
 use lazy_static::lazy_static;
 use std::sync::Mutex;
@@ -33,6 +33,20 @@ static YOUTUBE_CHUNK_SIZE: u32 = 128;
 static YOUTUBE_URL: &str = "a.rtmp.youtube.com";
 static YOUTUBE_APP: &str = "live2/x";
 static YOUTUBE_KEY: &str = "0kjx-g7uh-82dh-vbqc-ct1p";
+
+/*
+        defaultProtocol = Protocol::RTMP;
+        defaultServer = "a.rtmp.youtube.com";
+        mApp = "live2/x";
+        if (APP_OPTIONS_IN_URL)
+        {
+            mOptions = " app=live2";
+        }
+        else
+        {
+            mAppOption = "live2";
+        }
+*/
 
 impl MyClientSessionConfig {
     fn new() -> Self {
@@ -99,7 +113,8 @@ lazy_static! {
         Mutex::new(MyClientSessionConfig::default());
 }
 
-fn new_session_and_successful_connect_creates_set_chunk_size_message() -> Result<(ClientSession, ChunkSerializer, ChunkDeserializer), RtmpError> {
+fn new_session_and_successful_connect_creates_set_chunk_size_message(
+) -> Result<(ClientSession, ChunkSerializer, ChunkDeserializer), RtmpError> {
     let app_name = YOUTUBE_APP.to_string();
     let mut config = CLIENT_CONFIG.lock().unwrap();
     config.set_chunk_size(4096);
@@ -302,9 +317,14 @@ fn receiver(rx: Receiver<MyEncodedFrame>) {
     match res {
         Ok((mut session, mut serializer, mut deserializer)) => {
             let mut file = fs::File::create("rx-thread.h264").unwrap();
+
+            let results = session.send_ping_request();
+            if let Err(err) = results {
+                println!("Ping fail:{}", err);
+            }
+
             loop {
                 let frame = rx.recv();
-
                 if let Err(err) = frame {
                     println!("rx fail: {:#?}", err);
                 } else {
@@ -322,7 +342,7 @@ fn receiver(rx: Receiver<MyEncodedFrame>) {
                             consume_results(&mut deserializer, vec![results]);
                         },
                         Err(err) => {
-                            println!("Failed to publish video, {}", err);
+//                            println!("Failed to publish video, {}", err);
                         }
                     }
                 }
@@ -373,6 +393,7 @@ fn encode(rx_enc: Receiver<MyFrame>) {
     }
 }
 
+/*
 fn main() {
     let (tx_cam, rx_enc) = unbounded();
     thread::spawn(move || {
@@ -388,6 +409,7 @@ fn main() {
         tx_cam.send(yuv_source);
     }
 }
+*/
 
 fn create_camera() -> Option<Camera> {
     let mut camera = Camera::new("/dev/video0").unwrap();
@@ -439,7 +461,7 @@ impl MyFrame {
 
         Self {
             payload: YUVBuffer::with_rgb(w, h, &frame[..]),
-            timestamp: ts
+            timestamp: ts,
         }
     }
 }
@@ -453,7 +475,7 @@ impl MyEncodedFrame {
     pub fn build(frame: Vec<u8>, ts: u64) -> Self {
         Self {
             payload: frame,
-            timestamp: ts
+            timestamp: ts,
         }
     }
 }
