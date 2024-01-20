@@ -5,7 +5,7 @@
 */
 
 use log::error;
-use rml_amf0::Amf0Value;
+use rml_amf0::{Amf0Value, serialize};
 use rml_rtmp::{
     chunk_io::{ChunkDeserializer, ChunkSerializer, Packet},
     messages::{MessagePayload, RtmpMessage},
@@ -16,6 +16,7 @@ use rml_rtmp::{
     time::RtmpTimestamp,
 };
 use std::{collections::HashMap, fs};
+use bytes::Bytes;
 
 use lazy_static::lazy_static;
 use std::sync::Mutex;
@@ -98,7 +99,7 @@ lazy_static! {
         Mutex::new(MyClientSessionConfig::default());
 }
 
-fn new_session_and_successful_connect_creates_set_chunk_size_message() {
+fn new_session_and_successful_connect_creates_set_chunk_size_message() -> Result<(ClientSession, ChunkSerializer, ChunkDeserializer), RtmpError> {
     let app_name = YOUTUBE_APP.to_string();
     let mut config = CLIENT_CONFIG.lock().unwrap();
     config.set_chunk_size(4096);
@@ -128,16 +129,20 @@ fn new_session_and_successful_connect_creates_set_chunk_size_message() {
                 Ok(results) => {
                     println!("Consume results after 'request_publishing'");
                     consume_results(&mut deserializer, vec![results]);
-                }
+                    return Ok((session, serializer, deserializer))
+                },
                 Err(err) => {
                     println!("session.request_publishing error: {:?}", err);
+                    return Err(RtmpError::RtmpErrorUnknown);
                 }
             }
         }
         Err(err) => {
             println!("ClientSessionError: {:?}", err);
+            return Err(RtmpError::RtmpErrorUnknown);
         }
     }
+    Err(RtmpError::RtmpErrorUnknown)
 }
 
 fn consume_results(deserializer: &mut ChunkDeserializer, results: Vec<ClientSessionResult>) {
@@ -269,6 +274,10 @@ fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
     serializer.serialize(&payload, false, false).unwrap()
 }
 
+enum RtmpError{
+    RtmpErrorUnknown,
+}
+
 /******************************************/
 
 use std::io::Write;
@@ -289,16 +298,38 @@ static FRAME_RATE: (u32, u32) = (1, 30); // 30 fps.
 static DEFAULT_BITRATE: u32 = 2_000_000;
 
 fn receiver(rx: Receiver<MyEncodedFrame>) {
-    //    new_session_and_successful_connect_creates_set_chunk_size_message();
+    let res = new_session_and_successful_connect_creates_set_chunk_size_message();
+    match res {
+        Ok((mut session, mut serializer, mut deserializer)) => {
+            let mut file = fs::File::create("rx-thread.h264").unwrap();
+            loop {
+                let frame = rx.recv();
 
-    let mut file = fs::File::create("rx-thread.h264").unwrap();
-    loop {
-        let frame = rx.recv();
+                if let Err(err) = frame {
+                    println!("rx fail: {:#?}", err);
+                } else {
+                    let frame = frame.unwrap();
+                    file.write_all(&frame.payload);
 
-        if let Err(err) = frame {
-            error!("rx fail: {:#?}", err);
-        } else {
-            file.write_all(&frame.unwrap().payload);
+                    let bytes = Bytes::from(frame.payload);
+                    let len = bytes.len();
+                    let timestamp = (frame.timestamp/1000) as u32;
+                    let results = session.publish_video_data(bytes, RtmpTimestamp::new(timestamp), false);
+                    println!("publishing:{}", len);
+                    match results {
+                        Ok(results) => {
+                            println!("!!! published:{}", len);
+                            consume_results(&mut deserializer, vec![results]);
+                        },
+                        Err(err) => {
+                            println!("Failed to publish video, {}", err);
+                        }
+                    }
+                }
+            }
+        },
+        Err(err) => {
+            println!("Failed to create rtmp client");
         }
     }
 }
@@ -312,18 +343,18 @@ fn encode(rx_enc: Receiver<MyFrame>) {
     let encoder = create_encoder();
 
     if let Err(err) = encoder {
-        error!("Failed to invoke encoder:{}", err);
+        println!("Failed to invoke encoder:{}", err);
     } else {
         let mut encoder = encoder.unwrap();
         loop {
             let yuv_source = rx_enc.recv();
             if let Err(err) = yuv_source {
-                error!("yuv_source rx fail: {:#?}", err);
+                println!("yuv_source rx fail: {:#?}", err);
             } else {
                 let yuv_source = yuv_source.unwrap();
                 let bitstream = encoder.encode(&yuv_source.payload);
                 if let Err(err) = bitstream {
-                    error!("failed bitstream:{}", err);
+                    println!("failed bitstream:{}", err);
                 } else {
                     let bs = bitstream.unwrap();
 
@@ -334,7 +365,7 @@ fn encode(rx_enc: Receiver<MyFrame>) {
                     let frame = MyEncodedFrame::build(bs.to_vec(), yuv_source.timestamp);
                     let tx_res = tx.send(frame);
                     if let Err(err) = tx_res {
-                        error!("tx fail: {:#?}", err);
+                        println!("tx fail: {:#?}", err);
                     }
                 }
             }
