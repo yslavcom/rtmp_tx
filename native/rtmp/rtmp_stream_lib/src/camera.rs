@@ -1,3 +1,16 @@
+use rscam::{Camera, Config, Frame};
+
+use crossbeam_channel::unbounded;
+use crossbeam_channel::Receiver;
+use std::thread;
+
+static X_RES: u32 = 1280;
+static Y_RES: u32 = 720;
+static FRAME_RATE: (u32, u32) = (1, 30); // 30 fps.
+static DEFAULT_BITRATE: u32 = 2_000_000;
+
+
+
 fn create_camera() -> Option<Camera> {
     let mut camera = Camera::new("/dev/video0").unwrap();
 

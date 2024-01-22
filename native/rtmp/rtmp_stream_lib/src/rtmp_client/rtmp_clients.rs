@@ -1,27 +1,13 @@
-/*
-1. Request a connection to an "application"
-2. Request to open a stream to publish on
-3. Request access to publish with a particular stream name
-*/
 
-use std::io::Write;
+use rml_rtmp::handshake::Handshake;
+use rml_rtmp::handshake::PeerType;
+use slab::Slab;
+use std::net::SocketAddr;
+use std::str::FromStr;
 
-use rscam::{Camera, Config, Frame};
+use mio::net::TcpStream;
+use mio::{Poll, Token};
 
-use openh264::encoder::{Encoder, EncoderConfig, RateControlMode};
-use openh264::formats::YUVBuffer;
-use openh264::OpenH264API;
-
-use crossbeam_channel::unbounded;
-use crossbeam_channel::Receiver;
-use std::thread;
-
-static X_RES: u32 = 1280;
-static Y_RES: u32 = 720;
-static FRAME_RATE: (u32, u32) = (1, 30); // 30 fps.
-static DEFAULT_BITRATE: u32 = 2_000_000;
-
-use bytes::Bytes;
 use log::error;
 use rml_amf0::{serialize, Amf0Value};
 use rml_rtmp::{
@@ -33,10 +19,24 @@ use rml_rtmp::{
     },
     time::RtmpTimestamp,
 };
-use std::{collections::HashMap, fs, result};
+use std::{
+    collections::{HashMap, VecDeque},
+    fs, result,
+    net::ToSocketAddrs
+};
 
-use lazy_static::lazy_static;
-use std::sync::Mutex;
+// mod connection;
+use super::connection::Connection;
+
+macro_rules! trace {
+    ($($args: expr),*) => {
+        print!("TRACE: file: {}, line: {}", file!(), line!());
+        $(
+            print!(", {}: {}", stringify!($args), $args);
+        )*
+        println!(""); // to get a new line at the end
+    }
+}
 
 #[derive(Clone)]
 pub struct MyClientSessionConfig {
@@ -44,12 +44,15 @@ pub struct MyClientSessionConfig {
     stream_key: Option<String>,
 }
 
-// static APP_NAME: &str = "test rtmp";
+static LOG_DEBUG_LOGIC: bool = true;
 
 static YOUTUBE_CHUNK_SIZE: u32 = 128;
-static YOUTUBE_URL: &str = "a.rtmp.youtube.com";
+
+static YOUTUBE_DEFAULT_SERVER: &str = "a.rtmp.youtube.com:1935";
 static YOUTUBE_APP: &str = "live2/x";
 static YOUTUBE_KEY: &str = "0kjx-g7uh-82dh-vbqc-ct1p";
+//static YOUTUBE_APP_OPTION: &str = " app=live2";
+static YOUTUBE_APP_OPTION: &str = "live2";
 
 /*
         defaultProtocol = Protocol::RTMP;
@@ -82,11 +85,12 @@ impl MyClientSessionConfig {
     }
 
     pub fn default() -> Self {
-        let mut var = Self::custom_config(Some(YOUTUBE_CHUNK_SIZE), Some(YOUTUBE_URL));
+        let mut var = Self::new();
+        var.set_url(YOUTUBE_DEFAULT_SERVER);
         var.set_stream_key(Some(YOUTUBE_KEY));
         return var;
     }
-
+/*
     pub fn custom_config(chunk_size: Option<u32>, tc_url: Option<&str>) -> Self {
         let mut var = Self::new();
 
@@ -99,9 +103,13 @@ impl MyClientSessionConfig {
         }
         return var;
     }
-
+*/
     pub fn set_url(&mut self, tc_url: &str) {
         self.config.tc_url = Some(tc_url.to_string());
+    }
+
+    pub fn get_url(&self) -> Option<String> {
+        self.config.tc_url.clone()
     }
 
     pub fn set_chunk_size(&mut self, chunk_size: u32) {
@@ -157,8 +165,7 @@ fn split_results(
                     RtmpMessage::SetChunkSize { size } => {
                         deserializer.set_max_chunk_size(size as usize).unwrap()
                     }
-                    other => {
-                    }
+                    other => {}
                 }
                 responses.push((payload, message));
             }
@@ -202,12 +209,12 @@ fn perform_successful_connect(
                     }
                 }
                 Err(err) => {
-                    println!("session.handle_input error: {:?}", err);
+                    trace!("session.handle_input error: {:?}", err);
                 }
             }
         }
         Err(err) => {
-            println!("session.request_connection error: {:?}", err);
+            trace!("session.request_connection error: {:?}", err);
         }
     }
 }
@@ -250,62 +257,134 @@ fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
     serializer.serialize(&payload, false, false).unwrap()
 }
 
-pub enum RtmpError{
+#[derive(Debug)]
+pub enum RtmpError {
     RtmpErrorUnknown,
+    SocketAddrFailure,
 }
 
 /*******************************************************
  *
 */
-lazy_static! {
-    static ref CLIENT_CONFIG: Mutex<MyClientSessionConfig> =
-        Mutex::new(MyClientSessionConfig::default());
-}
 
-pub fn new_session_and_successful_connect_creates_set_chunk_size_message() -> Result<(ClientSession, ChunkSerializer, ChunkDeserializer), RtmpError> {
-    let app_name = YOUTUBE_APP.to_string();
-    let mut config = CLIENT_CONFIG.lock().unwrap();
+pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
+) -> Result<(ClientSession, ChunkSerializer, ChunkDeserializer), RtmpError> {
+    let mut client = PushClient::new();
+
+    let mut config = MyClientSessionConfig::default();
     config.set_chunk_size(4096);
     config.set_flash_version("test");
+
+    client.push_app = YOUTUBE_APP.to_string();
+
+    let mut connections = Slab::new();
+    let mut poll = Poll::new().unwrap();
 
     let mut deserializer = ChunkDeserializer::new();
     let mut serializer = ChunkSerializer::new();
     let results = ClientSession::new(config.config.clone());
+
     match results {
         Ok((mut session, initial_results)) => {
-            println!("initial_results:{:#?}", initial_results);
-            consume_results(&mut deserializer, initial_results);
+            //            println!("initial_results:{:#?}", initial_results);
+            //            consume_results(&mut deserializer, initial_results);
+            if config.get_url().is_some_and(|val| val.len() > 1) {
+                let push_host = config.get_url();
+                if push_host.is_none() {
+                    println!("Failed to retrieve url");
+                    return Err(RtmpError::RtmpErrorUnknown);
+                } else {
+                    let push_host = push_host.unwrap();
+
+                    // Gracefully itenrate through available SocketAddr
+                    let server: Vec<_>= push_host
+                        .to_socket_addrs()
+                        .expect("Unable to resolve domain")
+                        .collect();
+                    if !server.is_empty() {
+                        let addr = server[0] ;
+                        //let addr = SocketAddr::from_str(&push_host);
+                        let stream = TcpStream::connect(&addr).unwrap();
+                        let mut connection_count = 1;
+                        let connection = Connection::new(stream, connection_count, LOG_DEBUG_LOGIC, false);
+                        let token = connections.insert(connection);
+                        connection_count += 1;
+
+                        println!("Pull client started with connection id {}", token);
+                        connections[token].token = Some(Token(token));
+                        connections[token].register(&mut poll).unwrap();
+                    }
+                    else {
+                        trace!("Failed to match SocketAddr with push_host = {}", push_host);
+                    }
+                }
+            }
 
             perform_successful_connect(
-                app_name.clone(),
+                client.push_app.clone(),
                 &mut session,
                 &mut serializer,
                 &mut deserializer,
             );
+            client.session = Some(session);
+
             let stream_key = config.get_stream_key().unwrap_or_else(|| {
                 panic!("Missing Stream Key, error");
             });
 
-            println!("Go to `request_publishing`: {}", stream_key);
+            let mut session = client.session;
+            if let Some(mut session) = session {
+                println!("Go to `request_publishing`: {}", stream_key);
 
-            let results = session.request_publishing(stream_key, PublishRequestType::Live);
-            match results {
-                Ok(results) => {
-                    println!("Consume results after 'request_publishing'");
-                    consume_results(&mut deserializer, vec![results]);
-                    return Ok((session, serializer, deserializer))
-                },
-                Err(err) => {
-                    println!("session.request_publishing error: {:?}", err);
-                    return Err(RtmpError::RtmpErrorUnknown);
+                let results = session.request_publishing(stream_key, PublishRequestType::Live);
+                match results {
+                    Ok(results) => {
+                        println!("Consume results after 'request_publishing'");
+                        consume_results(&mut deserializer, vec![results]);
+                        return Ok((session, serializer, deserializer));
+                    }
+                    Err(err) => {
+                        trace!("session.request_publishing error: {:?}", err);
+                        return Err(RtmpError::RtmpErrorUnknown);
+                    }
                 }
             }
-        },
+        }
         Err(err) => {
-            println!("ClientSessionError: {:?}", err);
+            trace!("ClientSessionError: {:?}", err);
             return Err(RtmpError::RtmpErrorUnknown);
         }
     }
     Err(RtmpError::RtmpErrorUnknown)
 }
 
+enum PushState {
+    Idle,
+    WaitingConnection,
+    Handshaking,
+    Connecting,
+    Connected,
+    Publishing,
+}
+
+struct PushClient {
+    session: Option<ClientSession>,
+    connection_id: Option<usize>,
+    push_app: String,
+    push_source_stream: String,
+    push_target_stream: String,
+    state: PushState,
+}
+
+impl PushClient {
+    pub fn new() -> Self {
+        return Self {
+            session: None,
+            connection_id: None,
+            push_app: "".to_string(),
+            push_source_stream: "".to_string(),
+            push_target_stream: "".to_string(),
+            state: PushState::Idle,
+        };
+    }
+}
