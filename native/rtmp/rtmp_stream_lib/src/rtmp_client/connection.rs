@@ -100,10 +100,7 @@ impl Connection {
             false => None,
         };
 
-        let handshake = match is_inbound_connection {
-            true => Handshake::new(PeerType::Server),
-            false => Handshake::new(PeerType::Client),
-        };
+        let handshake = Handshake::new(PeerType::Client);
 
         let mut connection = Connection {
             socket,
@@ -289,6 +286,7 @@ impl Connection {
 
         match result {
             HandshakeProcessResult::InProgress { response_bytes } => {
+                println!("Handshake InProgress...");
                 if response_bytes.len() > 0 {
                     self.enqueue_response(poll, response_bytes)?;
                 }
@@ -300,7 +298,7 @@ impl Connection {
                 response_bytes,
                 remaining_bytes,
             } => {
-                println!("Handshake successful!");
+                println!("Handshake Completed!");
                 if response_bytes.len() > 0 {
                     self.enqueue_response(poll, response_bytes)?;
                 }
@@ -321,6 +319,5 @@ impl Connection {
         }
     }
 }
-
 
 // check writable which sends data

@@ -6,7 +6,8 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use mio::net::TcpStream;
-use mio::{Poll, Token};
+use mio::{Poll, Token, Events};
+use mio::*;
 
 use log::error;
 use rml_amf0::{serialize, Amf0Value};
@@ -26,7 +27,7 @@ use std::{
 };
 
 // mod connection;
-use super::connection::Connection;
+use super::connection::{Connection, ReadResult, ConnectionError};
 
 macro_rules! trace {
     ($($args: expr),*) => {
@@ -48,6 +49,7 @@ static LOG_DEBUG_LOGIC: bool = true;
 
 static YOUTUBE_CHUNK_SIZE: u32 = 128;
 
+//static YOUTUBE_DEFAULT_SERVER: &str = "rtmp://a.rtmp.youtube.com:1935";
 static YOUTUBE_DEFAULT_SERVER: &str = "a.rtmp.youtube.com:1935";
 static YOUTUBE_APP: &str = "live2/x";
 static YOUTUBE_KEY: &str = "0kjx-g7uh-82dh-vbqc-ct1p";
@@ -261,11 +263,13 @@ fn get_connect_success_response(serializer: &mut ChunkSerializer) -> Packet {
 pub enum RtmpError {
     RtmpErrorUnknown,
     SocketAddrFailure,
+    HandshakeStartFailure,
 }
 
 /*******************************************************
  *
 */
+//const CLIENT: Token = Token(std::usize::MAX - 1);
 
 pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
 ) -> Result<(ClientSession, ChunkSerializer, ChunkDeserializer), RtmpError> {
@@ -279,6 +283,10 @@ pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
 
     let mut connections = Slab::new();
     let mut poll = Poll::new().unwrap();
+//    poll.register(&listener, CLIENT, Ready::readable(), PollOpt::edge()).unwrap();
+
+
+    println!("Listening for connections");
 
     let mut deserializer = ChunkDeserializer::new();
     let mut serializer = ChunkSerializer::new();
@@ -304,6 +312,7 @@ pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
                     if !server.is_empty() {
                         let addr = server[0] ;
                         //let addr = SocketAddr::from_str(&push_host);
+
                         let stream = TcpStream::connect(&addr).unwrap();
                         let mut connection_count = 1;
                         let connection = Connection::new(stream, connection_count, LOG_DEBUG_LOGIC, false);
@@ -313,10 +322,63 @@ pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
                         println!("Pull client started with connection id {}", token);
                         connections[token].token = Some(Token(token));
                         connections[token].register(&mut poll).unwrap();
+
+                        client.state = PushState::Handshaking;
+                        client.set_token(token);
                     }
                     else {
                         trace!("Failed to match SocketAddr with push_host = {}", push_host);
+                        return Err(RtmpError::SocketAddrFailure);
                     }
+                }
+            }
+
+            // handshaking here
+            let client_token = client.get_token().unwrap();
+            let res = connections[client_token].writable(&mut poll);
+            match res {
+                Ok(_) => {
+                    println!("writable OK");
+                },
+                Err(error) => {
+                    trace!("writable failed:{}", error);
+                    return Err(RtmpError::HandshakeStartFailure)
+                },
+            }
+
+            let mut events = Events::with_capacity(1024);
+
+            loop {
+                poll.poll(&mut events, None).unwrap();
+
+                for event in events.iter() {
+                    println!("event.token:{:#?}", event.token());
+
+                    match event.token() {
+                        Token(token) => {
+                            match process_event(&event.readiness(), &mut connections, token, &mut poll) {
+                                EventResult::None => (),
+                                EventResult::DisconnectConnection => {
+                                    println!("EventResult::DisconnectConnection");
+                                },
+
+                                EventResult::ReadResult(result) => {
+                                    match result {
+                                        ReadResult::HandshakingInProgress => {
+                                            println!("HandshakingInProgress");
+                                        },
+                                        ReadResult::HandshakeCompleted{buffer, byte_count} => {
+                                            println!("HandshakeCompleted, byte_count:{}", byte_count);
+                                        },
+                                        ReadResult::NoBytesReceived => (),
+                                        ReadResult::BytesReceived{buffer, byte_count} =>{
+                                            println!("BytesReceived, byte_count:{}", byte_count);
+                                        },
+                                    };
+                                },
+                            };
+                        },
+                    };
                 }
             }
 
@@ -374,6 +436,7 @@ struct PushClient {
     push_source_stream: String,
     push_target_stream: String,
     state: PushState,
+    token: Option<usize>,
 }
 
 impl PushClient {
@@ -385,6 +448,56 @@ impl PushClient {
             push_source_stream: "".to_string(),
             push_target_stream: "".to_string(),
             state: PushState::Idle,
+            token: None,
         };
     }
+
+    pub fn set_token(&mut self, token: usize) {
+        self.token = Some(token);
+    }
+
+    pub fn get_token(&self) -> Option<usize> {
+        return self.token;
+    }
+}
+
+enum EventResult {
+    None,
+    ReadResult(ReadResult),
+    DisconnectConnection,
+}
+
+fn process_event(
+    event: &Ready,
+    connections: &mut Slab<Connection>,
+    token: usize,
+    poll: &mut Poll,
+) -> EventResult {
+    let connection = match connections.get_mut(token) {
+        Some(connection) => connection,
+        None => return EventResult::None,
+    };
+
+    if event.is_writable() {
+        match connection.writable(poll) {
+            Ok(_) => (),
+            Err(error) => {
+                println!("Error occurred while writing: {:?}", error);
+                return EventResult::DisconnectConnection;
+            }
+        }
+    }
+
+    if event.is_readable() {
+        match connection.readable(poll) {
+            Ok(result) => return EventResult::ReadResult(result),
+            Err(ConnectionError::SocketClosed) => return EventResult::DisconnectConnection,
+            Err(x) => {
+                println!("Error occurred: {:?}", x);
+                return EventResult::DisconnectConnection;
+            }
+        }
+    }
+
+    EventResult::None
 }
