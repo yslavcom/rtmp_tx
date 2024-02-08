@@ -21,7 +21,7 @@ use rml_rtmp::{
     time::RtmpTimestamp,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet},
     fs, result,
     net::ToSocketAddrs
 };
@@ -77,6 +77,8 @@ void StreamingConfig::composeURL()
                         .append(mOptions);
 }
 */
+
+type ClosedTokens = HashSet<usize>;
 
 impl MyClientSessionConfig {
     fn new() -> Self {
@@ -317,7 +319,6 @@ pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
                         let mut connection_count = 1;
                         let connection = Connection::new(stream, connection_count, LOG_DEBUG_LOGIC, false);
                         let token = connections.insert(connection);
-                        connection_count += 1;
 
                         println!("Pull client started with connection id {}", token);
                         connections[token].token = Some(Token(token));
@@ -354,6 +355,8 @@ pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
                 for event in events.iter() {
                     println!("event.token:{:#?}", event.token());
 
+                    let mut rtmp_connections = ClosedTokens::new();
+
                     match event.token() {
                         Token(token) => {
                             match process_event(&event.readiness(), &mut connections, token, &mut poll) {
@@ -369,6 +372,13 @@ pub fn new_session_and_successful_connect_creates_set_chunk_size_message(
                                         },
                                         ReadResult::HandshakeCompleted{buffer, byte_count} => {
                                             println!("HandshakeCompleted, byte_count:{}", byte_count);
+                                            rtmp_connections = handle_read_bytes(
+                                                &buffer[..byte_count],
+                                                token,
+                                                &mut connections,
+                                                &mut poll
+                                            );
+
                                         },
                                         ReadResult::NoBytesReceived => (),
                                         ReadResult::BytesReceived{buffer, byte_count} =>{
@@ -500,4 +510,17 @@ fn process_event(
     }
 
     EventResult::None
+}
+
+fn handle_read_bytes(
+    bytes: &[u8],
+    from_token: usize,
+    connections: &mut Slab<Connection>,
+    poll: &mut Poll,
+) -> ClosedTokens {
+    let mut closed_tokens = ClosedTokens::new();
+
+    handle_input(bytes);
+
+    closed_tokens
 }
