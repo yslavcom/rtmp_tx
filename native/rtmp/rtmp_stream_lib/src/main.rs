@@ -1,12 +1,14 @@
 use std::env;
 
 mod rtmp_client;
-use rtmp_client::rtmp_clients::*;
+
+use rtmp_client::MyClientSession;
 
 fn main() {
     env::set_var("RUST_BACKTRACE", "1");
 
-    let ret = new_session_and_successful_connect_creates_set_chunk_size_message();
+    let mut client_session = MyClientSession::new();
+    let ret = client_session.new_session_and_successful_connect_creates_set_chunk_size_message();
     match ret {
         Ok(_) => {
             println!("ok");

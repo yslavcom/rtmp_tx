@@ -9,3 +9,5 @@ macro_rules! trace {
         println!(""); // to get a new line at the end
     }
 }
+
+pub fn ttt(){}
