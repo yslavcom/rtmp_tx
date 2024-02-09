@@ -40,25 +40,32 @@ type ClosedTokens = HashSet<usize>;
 static LOG_DEBUG_LOGIC: bool = true;
 
 pub struct MyClientSession{
-
+    connection_count: usize,
+    connection: Option<Connection>,
+    stream: Option<TcpStream>,
+    push_client: Option<PushClient>,
+    config: MyClientSessionConfig,
 }
 
 impl MyClientSession {
 
     pub fn new() -> Self {
-        Self{}
+        Self{
+            connection_count: 0,
+            connection: None,
+            stream: None,
+            push_client: Some(PushClient::new()),
+            config: MyClientSessionConfig::default(),
+        }
     }
 
     pub fn new_session_and_successful_connect_creates_set_chunk_size_message(&mut self
     ) -> Result<(ClientSession, ChunkSerializer, ChunkDeserializer), RtmpError> {
-        let mut client = PushClient::new();
-
-        let mut config = MyClientSessionConfig::default();
-        config.set_chunk_size(4096);
-        config.set_flash_version("test");
+        self.config.set_chunk_size(4096);
+        self.config.set_flash_version("test");
 
         //client.push_app = YOUTUBE_APP.to_string();
-        client.push_app = config.get_app();
+        self.push_client.unwrap().push_app = self.config.get_app();
 
         let mut connections = Slab::new();
         let mut poll = Poll::new().unwrap();
@@ -69,14 +76,12 @@ impl MyClientSession {
 
         let mut deserializer = ChunkDeserializer::new();
         let mut serializer = ChunkSerializer::new();
-        let results = ClientSession::new(config.config.clone());
+        let results = ClientSession::new(self.config.config.clone());
 
         match results {
             Ok((mut session, initial_results)) => {
-                //            println!("initial_results:{:#?}", initial_results);
-                //            consume_results(&mut deserializer, initial_results);
-                if config.get_url().is_some_and(|val| val.len() > 1) {
-                    let push_host = config.get_url();
+                if self.config.get_url().is_some_and(|val| val.len() > 1) {
+                    let push_host = self.config.get_url();
                     if push_host.is_none() {
                         println!("Failed to retrieve url");
                         return Err(RtmpError::RtmpErrorUnknown);
@@ -92,17 +97,17 @@ impl MyClientSession {
                             let addr = server[0] ;
                             //let addr = SocketAddr::from_str(&push_host);
 
-                            let stream = TcpStream::connect(&addr).unwrap();
-                            let mut connection_count = 1;
-                            let connection = Connection::new(stream, connection_count, LOG_DEBUG_LOGIC, false);
-                            let token = connections.insert(connection);
+                            self.stream = Some(TcpStream::connect(&addr).unwrap());
+                            self.connection_count = 1;
+                            self.connection = Some(Connection::new(self.stream.unwrap(), self.connection_count, LOG_DEBUG_LOGIC, false));
+                            let token = connections.insert(self.connection.unwrap());
 
                             println!("Pull client started with connection id {}", token);
                             connections[token].token = Some(Token(token));
                             connections[token].register(&mut poll).unwrap();
 
-                            client.state = PushState::Handshaking;
-                            client.set_token(token);
+                            self.push_client.unwrap().state = PushState::Handshaking;
+                            self.push_client.unwrap().set_token(token);
                         }
                         else {
                             trace!("Failed to match SocketAddr with push_host = {}", push_host);
@@ -112,7 +117,7 @@ impl MyClientSession {
                 }
 
                 // handshaking here
-                let client_token = client.get_token().unwrap();
+                let client_token = self.push_client.unwrap().get_token().unwrap();
                 let res = connections[client_token].writable(&mut poll);
                 match res {
                     Ok(_) => {
@@ -149,18 +154,22 @@ impl MyClientSession {
                                             },
                                             ReadResult::HandshakeCompleted{buffer, byte_count} => {
                                                 println!("HandshakeCompleted, byte_count:{}", byte_count);
-    /*
-                                                rtmp_connections = handle_read_bytes(
+                                                rtmp_connections = self.handle_read_bytes(
                                                     &buffer[..byte_count],
                                                     token,
                                                     &mut connections,
-                                                    &mut poll
+                                                    &mut poll,
                                                 );
-    */
                                             },
                                             ReadResult::NoBytesReceived => (),
                                             ReadResult::BytesReceived{buffer, byte_count} =>{
                                                 println!("BytesReceived, byte_count:{}", byte_count);
+                                                rtmp_connections = self.handle_read_bytes(
+                                                    &buffer[..byte_count],
+                                                    token,
+                                                    &mut connections,
+                                                    &mut poll,
+                                                );
                                             },
                                         };
                                     },
@@ -171,18 +180,18 @@ impl MyClientSession {
                 }
 
                 self.perform_successful_connect(
-                    client.push_app.clone(),
+                    self.push_client.unwrap().push_app.clone(),
                     &mut session,
                     &mut serializer,
                     &mut deserializer,
                 );
-                client.session = Some(session);
+                self.push_client.unwrap().session = Some(session);
 
-                let stream_key = config.get_stream_key().unwrap_or_else(|| {
+                let stream_key = self.config.get_stream_key().unwrap_or_else(|| {
                     panic!("Missing Stream Key, error");
                 });
 
-                let mut session = client.session;
+                let mut session = self.push_client.unwrap().session;
                 if let Some(mut session) = session {
                     println!("Go to `request_publishing`: {}", stream_key);
 
@@ -205,6 +214,7 @@ impl MyClientSession {
                 return Err(RtmpError::RtmpErrorUnknown);
             }
         }
+
         Err(RtmpError::RtmpErrorUnknown)
     }
 
@@ -361,108 +371,254 @@ impl MyClientSession {
         serializer.serialize(&payload, false, false).unwrap()
     }
 
-    /*
-    /// Takes in bytes that are encoding RTMP chunks and returns any responses or events that can
-    /// be reacted to.
-    pub fn handle_input(
+
+    fn handle_read_bytes(
         &mut self,
         bytes: &[u8],
-    ) -> Result<Vec<ServerSessionResult>, ServerSessionError> {
-        let mut results = Vec::new();
-        self.bytes_received += bytes.len() as u64;
+        from_token: usize,
+        connections: &mut Slab<Connection>,
+        poll: &mut Poll,
+    ) -> ClosedTokens {
+        let mut closed_tokens = ClosedTokens::new();
 
-        if let Some(peer_ack_size) = self.peer_window_ack_size {
-            self.bytes_received_since_last_ack += bytes.len() as u32;
-            if self.bytes_received_since_last_ack >= peer_ack_size {
-                let ack_message = RtmpMessage::Acknowledgement {
-                    sequence_number: self.bytes_received_since_last_ack,
-                };
-                let ack_payload = ack_message.into_message_payload(self.get_epoch(), 0)?;
-                let ack_packet = self.serializer.serialize(&ack_payload, false, false)?;
-
-                self.bytes_received_since_last_ack = 0;
-                results.push(ServerSessionResult::OutboundResponse(ack_packet));
+        let mut server_results = match self.bytes_received(from_token, bytes) {
+            Ok(results) => results,
+            Err(error) => {
+                println!("Input caused the following server error: {}", error);
+                closed_tokens.insert(from_token);
+                return closed_tokens;
             }
-        }
+        };
 
-        let mut bytes_to_process = bytes;
+        for result in server_results.drain(..) {
+            match result {
+                ServerResult::OutboundPacket {
+                    target_connection_id,
+                    packet,
+                } => match connections.get_mut(target_connection_id) {
+                    Some(connection) => connection.enqueue_packet(poll, packet).unwrap(),
+                    None => (),
+                },
 
-        loop {
-            match self.deserializer.get_next_message(bytes_to_process)? {
-                None => break,
-                Some(payload) => {
-                    let message = payload.to_rtmp_message()?;
+                ServerResult::DisconnectConnection { connection_id } => {
+                    closed_tokens.insert(connection_id);
+                }
 
-                    let mut message_results = match message {
-                        RtmpMessage::Abort { stream_id } => self.handle_abort_message(stream_id)?,
+                ServerResult::StartPushing => {
+/*
+                    if let Some(ref push) = app_options.push {
+                        println!(
+                            "Starting push to rtmp://{}/{}/{}",
+                            push.host, push.app, push.target_stream
+                        );
 
-                        RtmpMessage::Acknowledgement { sequence_number } => {
-                            self.handle_acknowledgement_message(sequence_number)?
+                        let mut push_host = push.host.clone();
+                        if !push_host.contains(":") {
+                            push_host = push_host + ":1935";
                         }
 
-                        RtmpMessage::Amf0Command {
-                            command_name,
-                            transaction_id,
-                            command_object,
-                            additional_arguments,
-                        } => self.handle_amf0_command(
-                            payload.message_stream_id,
-                            command_name,
-                            transaction_id,
-                            command_object,
-                            additional_arguments,
-                        )?,
+                        let addr = SocketAddr::from_str(&push_host).unwrap();
+                        let stream = TcpStream::connect(&addr).unwrap();
+                        let connection =
+                            Connection::new(stream, *connection_count, app_options.log_io, false);
+                        let token = connections.insert(connection);
+                        *connection_count += 1;
 
-                        RtmpMessage::Amf0Data { values } => {
-                            self.handle_amf0_data(values, payload.message_stream_id)?
-                        }
-
-                        RtmpMessage::AudioData { data } => self.handle_audio_data(
-                            data,
-                            payload.message_stream_id,
-                            payload.timestamp,
-                        )?,
-
-                        RtmpMessage::SetChunkSize { size } => self.handle_set_chunk_size(size)?,
-
-                        RtmpMessage::SetPeerBandwidth { size, limit_type } => {
-                            self.handle_set_peer_bandwidth(size, limit_type)?
-                        }
-
-                        RtmpMessage::UserControl {
-                            event_type,
-                            stream_id,
-                            buffer_length,
-                            timestamp,
-                        } => self.handle_user_control(
-                            event_type,
-                            stream_id,
-                            buffer_length,
-                            timestamp,
-                        )?,
-
-                        RtmpMessage::VideoData { data } => self.handle_video_data(
-                            data,
-                            payload.message_stream_id,
-                            payload.timestamp,
-                        )?,
-
-                        RtmpMessage::WindowAcknowledgement { size } => {
-                            self.handle_window_acknowledgement(size)?
-                        }
-
-                        _ => vec![ServerSessionResult::UnhandleableMessageReceived(payload)],
-                    };
-
-                    results.append(&mut message_results);
-                    bytes_to_process = &[];
+                        println!("Push client started with connection id {}", token);
+                        connections[token].token = Some(Token(token));
+                        connections[token].register(poll).unwrap();
+                        self.register_push_client(token);
+                    }
+*/
                 }
             }
         }
 
-        Ok(results)
+        closed_tokens
     }
-    */
+
+    pub fn bytes_received(
+        &mut self,
+        connection_id: usize,
+        bytes: &[u8],
+    ) -> Result<Vec<ServerResult>, String> {
+        let mut server_results = Vec::new();
+
+        let push_client_connection_id = self.push_client.as_ref().map_or(None, |c| {
+            if let Some(connection_id) = c.connection_id {
+                Some(connection_id)
+            } else {
+                None
+            }
+        });
+
+        if push_client_connection_id
+            .as_ref()
+            .map_or(false, |id| *id == connection_id)
+        {
+            // These bytes were received by the current push client
+            let mut initial_session_results = Vec::new();
+
+            let session_results = if let Some(ref mut push_client) = self.push_client {
+                match push_client.session.as_mut().unwrap().handle_input(bytes) {
+                    Ok(results) => results,
+                    Err(error) => return Err(error.to_string()),
+                }
+            } else {
+                Vec::new()
+            };
+
+            if initial_session_results.len() > 0 {
+                self.handle_push_session_results(initial_session_results, &mut server_results);
+            }
+
+            self.handle_push_session_results(session_results, &mut server_results);
+        }
+
+        Ok(server_results)
+    }
+
+    fn handle_push_session_results(
+        &mut self,
+        session_results: Vec<ClientSessionResult>,
+        server_results: &mut Vec<ServerResult>,
+    ) {
+        let mut new_results = Vec::new();
+        let mut events = Vec::new();
+        if let Some(ref mut client) = self.push_client {
+            for result in session_results {
+                match result {
+                    ClientSessionResult::OutboundResponse(packet) => {
+                        server_results.push(ServerResult::OutboundPacket {
+                            target_connection_id: client.connection_id.unwrap(),
+                            packet,
+                        });
+                    }
+
+                    ClientSessionResult::RaisedEvent(event) => {
+                        events.push(event);
+                    }
+
+                    x => println!("Push client result received: {:?}", x),
+                }
+            }
+
+            match client.state {
+                PushState::Handshaking => {
+                    // Since we got here we know handshaking was successful, so we need
+                    // to initiate the connection process
+                    client.state = PushState::Connecting;
+
+                    let result = match client
+                        .session
+                        .as_mut()
+                        .unwrap()
+                        .request_connection(client.push_app.clone())
+                    {
+                        Ok(result) => result,
+                        Err(error) => {
+                            println!("Failed to request connection for push client: {:?}", error);
+                            return;
+                        }
+                    };
+
+                    new_results.push(result);
+                }
+                _ => (),
+            }
+        }
+
+        if !new_results.is_empty() {
+            self.handle_push_session_results(new_results, server_results);
+        }
+
+        for event in events {
+            match event {
+                ClientSessionEvent::ConnectionRequestAccepted => {
+                    self.handle_push_connection_accepted_event(server_results);
+                }
+
+                ClientSessionEvent::PublishRequestAccepted => {
+                    self.handle_push_publish_accepted_event(server_results);
+                }
+
+                x => println!("Push event raised: {:?}", x),
+            }
+        }
+    }
+
+    fn handle_push_connection_accepted_event(&mut self, server_results: &mut Vec<ServerResult>) {
+        let mut new_results = Vec::new();
+        if let Some(ref mut client) = self.push_client {
+            println!("push accepted for app '{}'", client.push_app);
+            client.state = PushState::Connected;
+
+            let result = client
+                .session
+                .as_mut()
+                .unwrap()
+                .request_publishing(client.push_target_stream.clone(), PublishRequestType::Live)
+                .unwrap();
+
+            let mut results = vec![result];
+            new_results.append(&mut results);
+        }
+
+        if !new_results.is_empty() {
+            self.handle_push_session_results(new_results, server_results);
+        }
+    }
+
+    fn handle_push_publish_accepted_event(&mut self, server_results: &mut Vec<ServerResult>) {
+        let mut new_results = Vec::new();
+        if let Some(ref mut client) = self.push_client {
+            println!(
+                "Publish accepted for push stream key {}",
+                client.push_target_stream
+            );
+            client.state = PushState::Publishing;
+/*
+            // Send out any metadata or header information if we have any
+            if let Some(ref channel) = self.channels.get(&client.push_source_stream) {
+                if let Some(ref metadata) = channel.metadata {
+                    let result = client
+                        .session
+                        .as_mut()
+                        .unwrap()
+                        .publish_metadata(&metadata)
+                        .unwrap();
+                    new_results.push(result);
+                }
+
+                if let Some(ref bytes) = channel.video_sequence_header {
+                    let result = client
+                        .session
+                        .as_mut()
+                        .unwrap()
+                        .publish_video_data(bytes.clone(), RtmpTimestamp::new(0), false)
+                        .unwrap();
+
+                    new_results.push(result);
+                }
+
+                if let Some(ref bytes) = channel.audio_sequence_header {
+                    let result = client
+                        .session
+                        .as_mut()
+                        .unwrap()
+                        .publish_audio_data(bytes.clone(), RtmpTimestamp::new(0), false)
+                        .unwrap();
+
+                    new_results.push(result);
+                }
+            }
+*/
+        }
+
+        if !new_results.is_empty() {
+            self.handle_push_session_results(new_results, server_results);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -474,7 +630,6 @@ pub enum RtmpError {
 
 enum PushState {
     Idle,
-    WaitingConnection,
     Handshaking,
     Connecting,
     Connected,
@@ -517,4 +672,16 @@ enum EventResult {
     None,
     ReadResult(ReadResult),
     DisconnectConnection,
+}
+
+#[derive(Debug)]
+pub enum ServerResult {
+    DisconnectConnection {
+        connection_id: usize,
+    },
+    OutboundPacket {
+        target_connection_id: usize,
+        packet: Packet,
+    },
+    StartPushing,
 }
