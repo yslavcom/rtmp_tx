@@ -41,8 +41,6 @@ static LOG_DEBUG_LOGIC: bool = true;
 
 pub struct MyClientSession{
     connection_count: usize,
-    connection: Option<Connection>,
-    stream: Option<TcpStream>,
     push_client: Option<PushClient>,
     config: MyClientSessionConfig,
 }
@@ -52,8 +50,6 @@ impl MyClientSession {
     pub fn new() -> Self {
         Self{
             connection_count: 0,
-            connection: None,
-            stream: None,
             push_client: Some(PushClient::new()),
             config: MyClientSessionConfig::default(),
         }
@@ -65,7 +61,11 @@ impl MyClientSession {
         self.config.set_flash_version("test");
 
         //client.push_app = YOUTUBE_APP.to_string();
-        self.push_client.unwrap().push_app = self.config.get_app();
+        //self.push_client.unwrap().push_app = self.config.get_app();
+        if let Some(mut push_client) = self.push_client.take() {
+            push_client.push_app = self.config.get_app();
+            self.push_client = Some(push_client);
+        }
 
         let mut connections = Slab::new();
         let mut poll = Poll::new().unwrap();
@@ -97,17 +97,17 @@ impl MyClientSession {
                             let addr = server[0] ;
                             //let addr = SocketAddr::from_str(&push_host);
 
-                            self.stream = Some(TcpStream::connect(&addr).unwrap());
+                            let stream = TcpStream::connect(&addr).unwrap();
                             self.connection_count = 1;
-                            self.connection = Some(Connection::new(self.stream.unwrap(), self.connection_count, LOG_DEBUG_LOGIC, false));
-                            let token = connections.insert(self.connection.unwrap());
+                            let connection: Connection = Connection::new(stream, self.connection_count, LOG_DEBUG_LOGIC, false);
+                            let token = connections.insert(connection);
 
                             println!("Pull client started with connection id {}", token);
                             connections[token].token = Some(Token(token));
                             connections[token].register(&mut poll).unwrap();
 
-                            self.push_client.unwrap().state = PushState::Handshaking;
-                            self.push_client.unwrap().set_token(token);
+                            self.push_client.as_mut().map(|s| s.state = PushState::Handshaking);
+                            self.push_client.as_mut().map(|s| s.set_token(token));
                         }
                         else {
                             trace!("Failed to match SocketAddr with push_host = {}", push_host);
@@ -116,8 +116,8 @@ impl MyClientSession {
                     }
                 }
 
-                // handshaking here
-                let client_token = self.push_client.unwrap().get_token().unwrap();
+                // handshaking here, we know the push_client & the token have been set
+               let client_token = self.push_client.as_ref().map(|s| s.get_token().unwrap()).unwrap();
                 let res = connections[client_token].writable(&mut poll);
                 match res {
                     Ok(_) => {
