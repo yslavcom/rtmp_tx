@@ -71,7 +71,6 @@ impl Connection {
         socket: TcpStream,
         count: usize,
         log_debug_logic: bool,
-        is_inbound_connection: bool,
     ) -> Connection {
         socket
             .set_recv_buffer_size(SOCKET_RECEIVE_BUFFER_SIZE)

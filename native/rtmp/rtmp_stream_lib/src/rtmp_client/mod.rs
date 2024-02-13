@@ -99,7 +99,7 @@ impl MyClientSession {
 
                             let stream = TcpStream::connect(&addr).unwrap();
                             self.connection_count = 1;
-                            let connection: Connection = Connection::new(stream, self.connection_count, LOG_DEBUG_LOGIC, false);
+                            let connection: Connection = Connection::new(stream, self.connection_count, LOG_DEBUG_LOGIC);
                             let token = connections.insert(connection);
 
                             println!("Pull client started with connection id {}", token);
@@ -382,7 +382,10 @@ impl MyClientSession {
         let mut closed_tokens = ClosedTokens::new();
 
         let mut server_results = match self.bytes_received(from_token, bytes) {
-            Ok(results) => results,
+            Ok(results) => {
+                println!("results:{:#?}", results);
+                results
+            },
             Err(error) => {
                 println!("Input caused the following server error: {}", error);
                 closed_tokens.insert(from_token);
