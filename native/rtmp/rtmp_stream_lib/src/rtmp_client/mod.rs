@@ -383,7 +383,7 @@ impl MyClientSession {
 
         let mut server_results = match self.bytes_received(from_token, bytes) {
             Ok(results) => {
-                println!("results:{:#?}", results);
+//                println!("results:{:#?}", results);
                 results
             },
             Err(error) => {
@@ -455,12 +455,6 @@ impl MyClientSession {
             }
         });
 
-
-        match self.push_client{
-            Some(_) => println!("!!! bytes_received, push_client Some: {:?}, {:?}", push_client_connection_id, connection_id),
-            None => println!("!!! bytes_received, push_client None"),
-        };
-
         if push_client_connection_id
             .as_ref()
             .map_or(false, |id| *id == connection_id)
@@ -501,10 +495,11 @@ impl MyClientSession {
         session_results: Vec<ClientSessionResult>,
         server_results: &mut Vec<ServerResult>,
     ) {
+/*
         println!("!!! handle_push_session_results\n
             session_results:{:#?}\n
             server_results:{:#?}\n", session_results, server_results);
-
+*/
         let mut new_results = Vec::new();
         let mut events = Vec::new();
         if let Some(ref mut client) = self.push_client {
@@ -537,7 +532,10 @@ impl MyClientSession {
                         .unwrap()
                         .request_connection(client.push_app.clone())
                     {
-                        Ok(result) => result,
+                        Ok(result) => {
+                            println!("request_connection {} OK", client.push_app);
+                            result
+                        },
                         Err(error) => {
                             println!("Failed to request connection for push client: {:?}", error);
                             return;
