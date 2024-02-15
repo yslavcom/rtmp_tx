@@ -19,8 +19,7 @@ use rml_rtmp::{
     chunk_io::{ChunkDeserializer, ChunkSerializer, Packet},
     messages::{MessagePayload, RtmpMessage},
     sessions::{
-        ClientSession, ClientSessionEvent, ClientSessionResult,
-        PublishRequestType,
+        ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType
     },
     time::RtmpTimestamp,
 };
@@ -48,11 +47,17 @@ pub struct MyClientSession{
 impl MyClientSession {
 
     pub fn new() -> Self {
-        Self{
+        let s = Self{
             connection_count: 0,
             push_client: Some(PushClient::new()),
             config: MyClientSessionConfig::default(),
-        }
+        };
+
+        match s.push_client{
+            Some(_) => println!("!!! new, push_client Some"),
+            None => println!("!!! new, push_client None"),
+        };
+        return s;
     }
 
     pub fn new_session_and_successful_connect_creates_set_chunk_size_message(&mut self
@@ -61,11 +66,7 @@ impl MyClientSession {
         self.config.set_flash_version("test");
 
         //client.push_app = YOUTUBE_APP.to_string();
-        //self.push_client.unwrap().push_app = self.config.get_app();
-        if let Some(mut push_client) = self.push_client.take() {
-            push_client.push_app = self.config.get_app();
-            self.push_client = Some(push_client);
-        }
+        self.push_client.as_mut().map(|c|c.push_app = self.config.get_app());
 
         let mut connections = Slab::new();
         let mut poll = Poll::new().unwrap();
@@ -105,9 +106,8 @@ impl MyClientSession {
                             println!("Pull client started with connection id {}", token);
                             connections[token].token = Some(Token(token));
                             connections[token].register(&mut poll).unwrap();
-
+                            self.push_client.as_mut().map(|c| c.connection_id = Some(token));
                             self.push_client.as_mut().map(|s| s.state = PushState::Handshaking);
-                            self.push_client.as_mut().map(|s| s.set_token(token));
                         }
                         else {
                             trace!("Failed to match SocketAddr with push_host = {}", push_host);
@@ -117,7 +117,7 @@ impl MyClientSession {
                 }
 
                 // handshaking here, we know the push_client & the token have been set
-               let client_token = self.push_client.as_ref().map(|s| s.get_token().unwrap()).unwrap();
+                let client_token = self.push_client.as_ref().map(|s| s.connection_id.unwrap()).unwrap();
                 let res = connections[client_token].writable(&mut poll);
                 match res {
                     Ok(_) => {
@@ -455,6 +455,12 @@ impl MyClientSession {
             }
         });
 
+
+        match self.push_client{
+            Some(_) => println!("!!! bytes_received, push_client Some: {:?}, {:?}", push_client_connection_id, connection_id),
+            None => println!("!!! bytes_received, push_client None"),
+        };
+
         if push_client_connection_id
             .as_ref()
             .map_or(false, |id| *id == connection_id)
@@ -463,7 +469,16 @@ impl MyClientSession {
             let mut initial_session_results = Vec::new();
 
             let session_results = if let Some(ref mut push_client) = self.push_client {
-                match push_client.session.as_mut().unwrap().handle_input(bytes) {
+                if push_client.session.is_none() {
+                    let (session, session_results) =
+                        ClientSession::new(ClientSessionConfig::new()).unwrap();
+                    push_client.session = Some(session);
+
+                    for result in session_results {
+                        initial_session_results.push(result);
+                    }
+                }
+                match push_client.session.as_mut().map(|s| s.handle_input(bytes)).unwrap() {
                     Ok(results) => results,
                     Err(error) => return Err(error.to_string()),
                 }
@@ -486,6 +501,10 @@ impl MyClientSession {
         session_results: Vec<ClientSessionResult>,
         server_results: &mut Vec<ServerResult>,
     ) {
+        println!("!!! handle_push_session_results\n
+            session_results:{:#?}\n
+            server_results:{:#?}\n", session_results, server_results);
+
         let mut new_results = Vec::new();
         let mut events = Vec::new();
         if let Some(ref mut client) = self.push_client {
@@ -643,10 +662,8 @@ struct PushClient {
     session: Option<ClientSession>,
     connection_id: Option<usize>,
     push_app: String,
-    push_source_stream: String,
     push_target_stream: String,
     state: PushState,
-    token: Option<usize>,
 }
 
 impl PushClient {
@@ -655,19 +672,9 @@ impl PushClient {
             session: None,
             connection_id: None,
             push_app: "".to_string(),
-            push_source_stream: "".to_string(),
             push_target_stream: "".to_string(),
             state: PushState::Idle,
-            token: None,
         };
-    }
-
-    pub fn set_token(&mut self, token: usize) {
-        self.token = Some(token);
-    }
-
-    pub fn get_token(&self) -> Option<usize> {
-        return self.token;
     }
 }
 
